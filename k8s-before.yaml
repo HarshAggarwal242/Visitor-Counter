@@ -1,0 +1,197 @@
+# ---------------------------------------------------------------------------
+# BASELINE Kubernetes configuration - used ONLY for the "before" side of the
+# cost analysis (Technique 2: resource right-sizing, Technique 3: replicas).
+#
+# It is deliberately naive, like a first attempt at deploying the app:
+#   * 5 fixed Flask replicas that are always running (no HPA)
+#   * every Pod reserves 500m CPU / 512Mi memory (10x what the app needs)
+#   * CPU limit of 1 full core per Pod
+#
+# It uses the SAME object names as k8s.yaml, so it replaces the tuned
+# deployment when applied. Never mix it with the HPA: delete the HPA first.
+#
+# scripts/measure.ps1 does this automatically, but the manual sequence is:
+#   kubectl delete -f hpa.yaml --ignore-not-found
+#   kubectl apply  -f k8s-before.yaml
+#   kubectl get pods -l app=visitor-counter
+#   kubectl apply  -f k8s.yaml
+#   kubectl apply  -f hpa.yaml
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: visitor-counter-secret
+  labels:
+    app: visitor-counter
+    variant: baseline
+type: Opaque
+stringData:
+  REDIS_PASSWORD: "change-me-redis"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: visitor-counter-config
+  labels:
+    app: visitor-counter
+    variant: baseline
+data:
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  VISIT_COUNTER_KEY: "visitor:total"
+  APP_PORT: "5000"
+  APP_LOCATION: "baseline-overprovisioned"
+  LOG_LEVEL: "INFO"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-storage
+  labels:
+    app: redis
+    variant: baseline
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: redis
+    tier: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        tier: database
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - exec redis-server --appendonly yes --requirepass "$(REDIS_PASSWORD)"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: visitor-counter-secret
+                  key: REDIS_PASSWORD
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: visitor-counter
+  labels:
+    app: visitor-counter
+    tier: frontend
+    variant: baseline
+spec:
+  # Fixed, always-on replicas: no autoscaling.
+  replicas: 5
+  selector:
+    matchLabels:
+      app: visitor-counter
+  template:
+    metadata:
+      labels:
+        app: visitor-counter
+        tier: frontend
+    spec:
+      containers:
+        - name: flask
+          image: visitor-counter:optimized
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+          envFrom:
+            - configMapRef:
+                name: visitor-counter-config
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: visitor-counter-secret
+                  key: REDIS_PASSWORD
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            # Over-provisioned "first attempt" values.
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: visitor-counter
+  labels:
+    app: visitor-counter
+spec:
+  type: NodePort
+  selector:
+    app: visitor-counter
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080

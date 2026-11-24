@@ -1,0 +1,12 @@
+Public GitHub repository URL for this project:
+
+REPLACE_WITH_YOUR_REPOSITORY_URL
+
+How to fill this in (after you create the repository):
+
+    git remote -v
+    # copy the https://github.com/<your-user>/visitor-counter-cloud-project.git URL
+
+Notes for submission:
+  * The repository must be PUBLIC for the faculty to open the link.
+  * Never commit secrets, passwords or .env files (see .gitignore).

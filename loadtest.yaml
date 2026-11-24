@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# OPTIONAL in-cluster load generator, used to demonstrate HPA autoscaling.
+#
+#   kubectl apply  -f loadtest.yaml     # start the load
+#   kubectl delete -f loadtest.yaml     # stop the load
+#
+# Why run the load from inside the cluster?
+#   A "kubectl port-forward" from Windows funnels every request through one
+#   local tunnel, so the tunnel - not the app - becomes the bottleneck and CPU
+#   per Pod may never rise. Three Pods hammering the ClusterIP Service directly
+#   generate real, distributed load, which is what HPA needs to be measured on.
+#
+# Generate traffic from Windows instead (latency measurement) with:
+#   python load_test.py --url http://localhost:8080/ --workers 30 --duration 180
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-generator
+  labels:
+    app: load-generator
+    purpose: hpa-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: load-generator
+  template:
+    metadata:
+      labels:
+        app: load-generator
+        purpose: hpa-demo
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: load
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            # 6 sequential requests per loop, forever. Requests go to the
+            # Flask Service name, never to a specific Pod.
+            - "while true; do for i in 1 2 3 4 5 6; do wget -q -O /dev/null http://visitor-counter/ || true; done; done"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi

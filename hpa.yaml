@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# Horizontal Pod Autoscaler for the Flask Deployment.
+#
+# Apply with:  kubectl apply -f hpa.yaml
+#
+# How the numbers are chosen:
+#   * Each Flask Pod requests 100m CPU (k8s.yaml).
+#   * averageUtilization: 50 means "keep average CPU near 50% of 100m = 50m".
+#   * Under load, utilization rises above 50% -> the HPA adds Pods (max 5).
+#   * When the load stops, utilization falls below 50% -> the HPA removes Pods
+#     until only minReplicas (2) remain.
+#
+# The metrics-server addon must be enabled, otherwise the HPA reports
+# "<unknown>/50%" and never scales:
+#   minikube addons enable metrics-server
+# ---------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: visitor-counter-hpa
+  labels:
+    app: visitor-counter
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: visitor-counter
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    # Scale up fast so the demo reacts within ~30-60 seconds.
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    # Scale down slowly (and not below 2 Pods) to avoid flapping.
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 30

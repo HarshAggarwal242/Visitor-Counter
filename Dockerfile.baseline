@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# BASELINE image - used ONLY for the "before" side of the cost optimization
+# comparison (reports/cost_analysis.csv, Technique 1).
+#
+# It is deliberately naive, like a first attempt:
+#   * full python:3.12 image (includes compilers, headers, docs)
+#   * pip cache left inside the image
+#   * no .dockerignore-friendly ordering
+#   * Flask development server instead of gunicorn
+#   * runs as root
+#
+# Build it once, measure it, and never deploy it:
+#   docker build -f Dockerfile.baseline -t visitor-counter:baseline .
+# ---------------------------------------------------------------------------
+FROM python:3.12
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+COPY app.py ./
+
+EXPOSE 5000
+
+CMD ["python", "app.py"]

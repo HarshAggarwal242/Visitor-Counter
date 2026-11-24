@@ -1,0 +1,37 @@
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ----- Secrets / local config (NEVER commit these) -----
+.env
+.env.*
+!.env.example
+*secret*.yaml
+!k8s.yaml
+
+# ----- Failover runtime state -----
+failover/.active-tunnel.json
+failover/.port-forward-*.log
+failover/*.pid
+
+# ----- Logs and temporary measurement output -----
+*.log
+logs/
+reports/_tmp/
+reports/*.tmp
+
+# ----- Editors / OS -----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+README.md
+**/README.md
+
+screenshots

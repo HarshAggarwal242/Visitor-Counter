@@ -1,0 +1,269 @@
+# ---------------------------------------------------------------------------
+# Kubernetes resources for the Visitor Counter (single cluster).
+#
+# Apply with:  kubectl apply -f k8s.yaml
+#
+# Resources created (in the "default" namespace):
+#   1. Secret            visitor-counter-secret  -> Redis password
+#   2. ConfigMap         visitor-counter-config  -> non-sensitive settings
+#   3. PVC               redis-storage           -> 1Gi persistent Redis data
+#   4. Deployment        redis                   -> 1 Redis pod
+#   5. Service           redis                   -> ClusterIP, port 6379
+#   6. Deployment        visitor-counter         -> 2 Flask pods
+#   7. Service           visitor-counter         -> NodePort 30080
+#
+# Image note: the Flask image is built on the host and loaded into Minikube
+# (minikube image load visitor-counter:optimized), therefore
+# imagePullPolicy: IfNotPresent and no registry is used.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 1. Secret - anything sensitive. Base64/stringData values are still readable
+#    by anyone with access to the cluster, so treat this as a demo secret.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: visitor-counter-secret
+  labels:
+    app: visitor-counter
+type: Opaque
+stringData:
+  REDIS_PASSWORD: "change-me-redis"
+---
+# ---------------------------------------------------------------------------
+# 2. ConfigMap - non-sensitive configuration shared by the Flask pods.
+#    APP_LOCATION is what the page shows ("Served by ...") and is how we prove
+#    which cluster answered a request during the failover demo.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: visitor-counter-config
+  labels:
+    app: visitor-counter
+data:
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  VISIT_COUNTER_KEY: "visitor:total"
+  APP_PORT: "5000"
+  APP_LOCATION: "primary-simulated-private-cloud"
+  LOG_LEVEL: "INFO"
+---
+# ---------------------------------------------------------------------------
+# 3. PersistentVolumeClaim - Redis data survives Pod restarts.
+#    minikube ships a default StorageClass called "standard", so we leave
+#    storageClassName out and let the cluster allocate it.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-storage
+  labels:
+    app: redis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# ---------------------------------------------------------------------------
+# 4. Redis Deployment
+#    strategy: Recreate because a ReadWriteOnce volume cannot be mounted by two
+#    Pods at the same time during a rolling update.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: redis
+    tier: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        tier: database
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          # $$ in a command is Kubernetes' escape so the shell sees $(VAR).
+          command:
+            - sh
+            - -c
+            - exec redis-server --appendonly yes --requirepass "$(REDIS_PASSWORD)"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: visitor-counter-secret
+                  key: REDIS_PASSWORD
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          # Right-sized for a demo counter: tiny CPU, modest memory.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping | grep -q PONG
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping | grep -q PONG
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-storage
+---
+# ---------------------------------------------------------------------------
+# 5. Redis Service - Flask reaches Redis simply as "redis:6379".
+#    ClusterIP is internal only, nothing outside the cluster can use it.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+# ---------------------------------------------------------------------------
+# 6. Flask Deployment (the workload the HPA scales)
+#    requests.cpu = 100m is the number the HPA compares against: 50% means the
+#    HPA targets ~50m CPU per Pod.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: visitor-counter
+  labels:
+    app: visitor-counter
+    tier: frontend
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: visitor-counter
+  template:
+    metadata:
+      labels:
+        app: visitor-counter
+        tier: frontend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: flask
+          image: visitor-counter:optimized
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+          envFrom:
+            - configMapRef:
+                name: visitor-counter-config
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: visitor-counter-secret
+                  key: REDIS_PASSWORD
+            # The Pod name is shown on the page, which makes HPA scaling and
+            # self-healing visible in the browser.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Readiness: only send traffic to a Pod that can actually reach Redis.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          # Liveness: restart only if the Flask process itself is stuck.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+---
+# ---------------------------------------------------------------------------
+# 7. Flask Service - NodePort so the page is reachable from Windows.
+#    Open it with:  minikube service visitor-counter --url
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: visitor-counter
+  labels:
+    app: visitor-counter
+spec:
+  type: NodePort
+  selector:
+    app: visitor-counter
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080
